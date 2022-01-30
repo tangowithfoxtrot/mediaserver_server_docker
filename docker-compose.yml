@@ -1,0 +1,206 @@
+version: '3.3'
+services:
+
+  traefik:
+    image: "traefik:v2.6"
+    container_name: "traefik"
+    command:
+
+      # Tell Traefik to discover containers using the Docker API
+      - --providers.docker=true
+      # Enable the Trafik dashboard
+      - --api.dashboard=true
+      # Set up LetsEncrypt
+      - --certificatesresolvers.letsencrypt.acme.caserver=${TRAEFIK_ACME_CASERVER}
+      - --certificatesresolvers.letsencrypt.acme.dnschallenge=true
+      - --certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare
+      - --certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      # Set up an insecure listener that redirects all traffic to TLS
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      # Set up the TLS configuration for our websecure listener
+      - --entrypoints.websecure.http.tls=true
+      - --entrypoints.websecure.http.tls.certResolver=letsencrypt
+      - --entrypoints.websecure.http.tls.domains[0].main=${TRAEFIK_DASHBOARD_HOST}
+      - --entrypoints.websecure.http.tls.domains[0].sans=*.home.${TRAEFIK_BASE_DNS}
+    environment:
+      - CF_API_EMAIL=${CF_API_EMAIL}
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_USER_PASS}"
+      - 'traefik.http.routers.traefik.rule=Host(`${TRAEFIK_DASHBOARD_HOST}`)'
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - 'traefik.http.routers.traefik.middlewares=strip'
+      - 'traefik.http.middlewares.strip.stripprefix.prefixes=/traefik'
+
+  whoami:
+    image: "traefik/whoami"
+    container_name: whoami
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.whoami.rule=Host(`whoami.${TRAEFIK_BASE_DNS}`)"
+      - "traefik.http.routers.whoami.entrypoints=websecure"
+      - "traefik.http.routers.whoami.tls.certresolver=letsencrypt"
+
+  transmission:
+    container_name: transmission
+    image: haugene/transmission-openvpn
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.transmission.rule=Host(`transmission.${TRAEFIK_BASE_DNS}`)"
+      - "traefik.http.routers.transmission.entrypoints=websecure"
+      - "traefik.http.routers.transmission.tls.certresolver=letsencrypt"
+      - "traefik.http.services.transmission.loadbalancer.server.port=9091"
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - '/home/$USER/Downloads:/data'
+    environment:
+      - TZ=${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - OPENVPN_PROVIDER=${OPENVPN_PROVIDER}
+      - OPENVPN_CONFIG=${OPENVPN_CONFIG}
+      - OPENVPN_USERNAME=${OPENVPN_USERNAME}
+      - OPENVPN_PASSWORD=${OPENVPN_PASSWORD}
+      - LOCAL_NETWORK=192.168.0.0/16
+      - TRANSMISSION_RPC_USERNAME=${TRANSMISSION_RPC_USERNAME}
+      - TRANSMISSION_RPC_PASSWORD=${TRANSMISSION_RPC_PASSWORD}
+      - TRANSMISSION_RPC_AUTHENTICATION_REQUIRED=true
+    #   - TRANSMISSION_WEB_UI=combustion 
+      - TRANSMISSION_WEB_UI=flood-for-transmission 
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0 # Needed if you use Mullvad
+
+  jackett:
+    container_name: jackett
+    image: lscr.io/linuxserver/jackett:latest
+    restart: unless-stopped
+    ports:
+      - 9117:9117
+    environment:
+      - TZ=${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ${MEDIA1}/downloads/torrent-blackhole:/downloads # place to put .torrent files for manual download
+      - ${CONFIG}/config/jackett:/config # config files
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jackett.rule=Host(`jackett.${TRAEFIK_BASE_DNS}`)"
+      - "traefik.http.routers.jackett.entrypoints=websecure"
+      - "traefik.http.routers.jackett.tls.certresolver=letsencrypt"
+      - "traefik.http.services.jackett.loadbalancer.server.port=9117"
+
+  sonarr:
+    container_name: sonarr
+    image: lscr.io/linuxserver/sonarr:latest
+    restart: unless-stopped
+    ports:
+      - 8989:8989
+    environment:
+      - TZ=${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ${CONFIG}/config/sonarr:/config # config files
+      - ${MEDIA}/Videos/TV/:/tv # tv shows folder
+      - ${MEDIA1}/Videos/TV/:/tv1 # tv shows folder
+      - ${MEDIA2}/downloads:/downloads # download folder
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sonarr.rule=Host(`sonarr.${TRAEFIK_BASE_DNS}`)"
+      - "traefik.http.routers.sonarr.entrypoints=websecure"
+      - "traefik.http.routers.sonarr.tls.certresolver=letsencrypt"
+      - "traefik.http.services.sonarr.loadbalancer.server.port=8989"
+
+  radarr:
+    container_name: radarr
+    image: lscr.io/linuxserver/radarr:latest
+    restart: unless-stopped
+    ports:
+      - 7878:7878
+    environment:
+      - TZ=${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ${CONFIG}/config/radarr:/config # config files
+      - ${MEDIA2}/Videos/Movies/:/movies # movies folder
+      - ${MEDIA2}/downloads:/downloads # download folder
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.radarr.rule=Host(`radarr.${TRAEFIK_BASE_DNS}`)"
+      - "traefik.http.routers.radarr.entrypoints=websecure"
+      - "traefik.http.routers.radarr.tls.certresolver=letsencrypt"
+      - "traefik.http.services.radarr.loadbalancer.server.port=7878"
+
+  bazarr:
+    container_name: bazarr
+    image: lscr.io/linuxserver/bazarr
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - UMASK_SET=022 # optional
+    volumes:
+      - ${CONFIG}/config/bazarr:/config # config files
+      - ${MEDIA2}/Videos/Movies/:/movies # movies folder
+      - ${MEDIA}/Videos/TV/:/tv # tv shows folder
+    ports:
+      - 6767:6767
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.bazarr.rule=Host(`bazarr.${TRAEFIK_BASE_DNS}`)"
+      - "traefik.http.routers.bazarr.entrypoints=websecure"
+      - "traefik.http.routers.bazarr.tls.certresolver=letsencrypt"
+      - "traefik.http.services.bazarr.loadbalancer.server.port=6767"
+      - "traefik.frontend.headers.SSLHost=bazarr.${TRAEFIK_BASE_DNS}"
+
+  jellyfin:
+    container_name: jellyfin
+    image: lscr.io/linuxserver/jellyfin
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+    ports:
+      - 8096:8096
+      - 8920:8920
+      - 7359:7359/udp
+      - 1900:1900/udp
+    volumes:
+      - ${CONFIG}/config/jellyfin/config:/config
+      - ${CONFIG}/config/jellyfin/cache:/cache
+      - ${MEDIA}/Videos/TV/:/data/tv # media library
+      - ${MEDIA1}/Videos/TV/:/data/tv1 # media library
+      - ${MEDIA2}/Videos/Movies/:/data/movies # media library
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jellyfin.rule=Host(`jellyfin.${TRAEFIK_BASE_DNS}`)"
+      - "traefik.http.routers.jellyfin.entrypoints=websecure"
+      - "traefik.http.routers.jellyfin.tls.certresolver=letsencrypt"
+      - "traefik.http.services.jellyfin.loadbalancer.server.port=8096"
